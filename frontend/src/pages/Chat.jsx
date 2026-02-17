@@ -3,7 +3,6 @@ import { useAuthStore } from "../store/useAuthStore";
 import { socket } from "../lib/socket";
 import api from "../api/axios";
 import { useNavigate } from "react-router-dom";
-// --- 1. Import motion here ---
 import { motion, AnimatePresence } from "framer-motion";
 import toast, { Toaster } from "react-hot-toast";
 import {
@@ -22,13 +21,28 @@ import {
   Check,
   CheckCheck,
   Maximize2,
+  Video,
+  Phone,
+  PhoneOff,
+  Mic,
+  MicOff,
+  Camera,
+  CameraOff,
 } from "lucide-react";
+
+// --- WEBRTC CONFIG ---
+const rtcConfig = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" }, // Public Google STUN server
+    { urls: "stun:global.stun.twilio.com:3478" },
+  ],
+};
 
 const Chat = () => {
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
 
-  // -- State --
+  // -- Chat State --
   const [messages, setMessages] = useState([]);
   const [readStatus, setReadStatus] = useState({});
   const [currentMessage, setCurrentMessage] = useState("");
@@ -39,7 +53,6 @@ const Chat = () => {
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  // --- 2. Define isSearching state ---
   const [isSearching, setIsSearching] = useState(false);
 
   const [selectedFile, setSelectedFile] = useState(null);
@@ -54,11 +67,26 @@ const Chat = () => {
   const [isFetchingOld, setIsFetchingOld] = useState(false);
   const [isLoadingInitial, setIsLoadingInitial] = useState(false);
 
+  // -- VIDEO CALL STATE --
+  const [callStatus, setCallStatus] = useState("idle"); // idle, calling, receiving, connected
+  const [callData, setCallData] = useState(null); // { from, signal, name }
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
+
+  // Refs
   const messagesContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const searchTimeoutRef = useRef(null);
   const observerRef = useRef(null);
+
+  // WebRTC Refs
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const peerConnectionRef = useRef(null);
+  const activeCallUserRef = useRef(null); // ID of user we are talking to
 
   const [activeReactionMessageId, setActiveReactionMessageId] = useState(null);
 
@@ -80,9 +108,7 @@ const Chat = () => {
           `/messages/${activeChannel.id}?page=${targetPage}`,
         );
         const fetchedMsgs = res.data.messages || [];
-
         if (res.data.readStatus) setReadStatus(res.data.readStatus);
-
         if (reset) {
           setMessages(fetchedMsgs);
           setPage(1);
@@ -119,7 +145,6 @@ const Chat = () => {
       },
       { threshold: 0.5 },
     );
-
     const msgElements = document.querySelectorAll(".message-item");
     if (msgElements.length > 0)
       observerRef.current.observe(msgElements[msgElements.length - 1]);
@@ -146,12 +171,10 @@ const Chat = () => {
     if (isSearchOpen) return;
     const container = messagesContainerRef.current;
     if (!container) return;
-
     if (container.scrollTop === 0 && hasMore && !isFetchingOld) {
       setIsFetchingOld(true);
       const previousHeight = container.scrollHeight;
       setPage((prev) => prev + 1);
-
       try {
         const nextPage = page + 1;
         const res = await api.get(
@@ -176,6 +199,161 @@ const Chat = () => {
     }
   };
 
+  // -------------------------
+  // WEBRTC LOGIC
+  // -------------------------
+
+  // 1. Start Call (Initiator)
+  const startCall = async (userToCallId) => {
+    setCallStatus("calling");
+    activeCallUserRef.current = userToCallId;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+      setLocalStream(stream);
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+      const peer = new RTCPeerConnection(rtcConfig);
+      peerConnectionRef.current = peer;
+
+      // Add Tracks
+      stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+
+      // Handle ICE Candidates
+      peer.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit("ice_candidate", {
+            to: userToCallId,
+            candidate: event.candidate,
+          });
+        }
+      };
+
+      // Handle Remote Stream
+      peer.ontrack = (event) => {
+        setRemoteStream(event.streams[0]);
+        if (remoteVideoRef.current)
+          remoteVideoRef.current.srcObject = event.streams[0];
+      };
+
+      // Create Offer
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+
+      socket.emit("call_user", {
+        userToCall: userToCallId,
+        signalData: offer,
+        from: user.id,
+        name: user.username,
+      });
+    } catch (err) {
+      console.error("Error starting call:", err);
+      toast.error("Could not access camera/microphone");
+      setCallStatus("idle");
+    }
+  };
+
+  // 2. Answer Call (Receiver)
+  const answerCall = async () => {
+    setCallStatus("connected");
+    const callerId = callData.from;
+    activeCallUserRef.current = callerId;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+      setLocalStream(stream);
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+
+      const peer = new RTCPeerConnection(rtcConfig);
+      peerConnectionRef.current = peer;
+
+      stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+
+      peer.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit("ice_candidate", {
+            to: callerId,
+            candidate: event.candidate,
+          });
+        }
+      };
+
+      peer.ontrack = (event) => {
+        setRemoteStream(event.streams[0]);
+        if (remoteVideoRef.current)
+          remoteVideoRef.current.srcObject = event.streams[0];
+      };
+
+      await peer.setRemoteDescription(
+        new RTCSessionDescription(callData.signal),
+      );
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+
+      socket.emit("answer_call", { signal: answer, to: callerId });
+    } catch (err) {
+      console.error("Error answering call:", err);
+      endCall();
+    }
+  };
+
+  // 3. End Call
+  const endCall = () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+      setLocalStream(null);
+    }
+    if (activeCallUserRef.current) {
+      socket.emit("end_call", { to: activeCallUserRef.current });
+    }
+
+    setRemoteStream(null);
+    setCallStatus("idle");
+    setCallData(null);
+    activeCallUserRef.current = null;
+  };
+
+  const toggleMic = () => {
+    if (localStream) {
+      localStream
+        .getAudioTracks()
+        .forEach((track) => (track.enabled = !track.enabled));
+      setIsMicMuted(!isMicMuted);
+    }
+  };
+
+  const toggleVideo = () => {
+    if (localStream) {
+      localStream
+        .getVideoTracks()
+        .forEach((track) => (track.enabled = !track.enabled));
+      setIsVideoOff(!isVideoOff);
+    }
+  };
+
+  // Attach local stream to video element when it mounts/updates
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, callStatus]);
+
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, callStatus]);
+
   // -- SOCKET LOGIC --
   useEffect(() => {
     if (!user) {
@@ -193,6 +371,36 @@ const Chat = () => {
       setIsConnected(false);
     }
 
+    // --- WebRTC Socket Events ---
+    function onCallUser(data) {
+      // Incoming call
+      setCallData(data);
+      setCallStatus("receiving");
+    }
+
+    function onCallAccepted(signal) {
+      setCallStatus("connected");
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.setRemoteDescription(
+          new RTCSessionDescription(signal),
+        );
+      }
+    }
+
+    function onIceCandidate(candidate) {
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.addIceCandidate(
+          new RTCIceCandidate(candidate),
+        );
+      }
+    }
+
+    function onCallEnded() {
+      endCall();
+      toast.success("Call ended");
+    }
+
+    // --- Standard Chat Events ---
     function onReceiveMessage(newMessage) {
       if (newMessage.channelId === activeChannel.id && !isSearchOpen) {
         setMessages((prev) => {
@@ -263,6 +471,12 @@ const Chat = () => {
     socket.on("user_stop_typing", onUserStopTyping);
     socket.on("message_reaction_update", onReactionUpdate);
 
+    // WebRTC Listeners
+    socket.on("call_user", onCallUser);
+    socket.on("call_accepted", onCallAccepted);
+    socket.on("ice_candidate", onIceCandidate);
+    socket.on("call_ended", onCallEnded);
+
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
@@ -273,9 +487,14 @@ const Chat = () => {
       socket.off("user_typing", onUserTyping);
       socket.off("user_stop_typing", onUserStopTyping);
       socket.off("message_reaction_update", onReactionUpdate);
+      socket.off("call_user", onCallUser);
+      socket.off("call_accepted", onCallAccepted);
+      socket.off("ice_candidate", onIceCandidate);
+      socket.off("call_ended", onCallEnded);
     };
   }, [user, navigate, activeChannel, isSearchOpen, fetchMessages]);
 
+  // ... (Rest of handlers: handleSendMessage, handleReaction, etc. remain the same) ...
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if ((!currentMessage.trim() && !selectedFile) || !user || isUploading)
@@ -384,7 +603,7 @@ const Chat = () => {
       setMessages(res.data.messages || []);
       setHasMore(false);
     } catch (err) {
-      toast.error("Search failed", err);
+      toast.error("Search failed");
     } finally {
       setIsSearching(false);
     }
@@ -403,7 +622,7 @@ const Chat = () => {
         }}
       />
 
-      {/* LIGHTBOX (Uses motion) */}
+      {/* LIGHTBOX */}
       <AnimatePresence>
         {lightboxImage && (
           <motion.div
@@ -424,6 +643,104 @@ const Chat = () => {
             <button className="absolute top-6 right-6 text-white/70 hover:text-white p-2 bg-white/10 rounded-full">
               <X className="w-6 h-6" />
             </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* --- VIDEO CALL OVERLAY --- */}
+      <AnimatePresence>
+        {callStatus !== "idle" && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-gray-950/80 backdrop-blur-lg flex items-center justify-center"
+          >
+            {/* CALLING / RECEIVING CARD */}
+            {(callStatus === "calling" || callStatus === "receiving") && (
+              <motion.div
+                initial={{ scale: 0.9 }}
+                animate={{ scale: 1 }}
+                className="bg-gray-900 border border-gray-700 p-8 rounded-3xl shadow-2xl flex flex-col items-center"
+              >
+                <div className="w-24 h-24 bg-indigo-600 rounded-full flex items-center justify-center mb-6 shadow-lg shadow-indigo-500/30">
+                  <Phone className="w-10 h-10 text-white animate-pulse" />
+                </div>
+                <h3 className="text-2xl font-bold mb-2">
+                  {callStatus === "calling"
+                    ? "Calling..."
+                    : `${callData?.name} is calling...`}
+                </h3>
+                <p className="text-gray-400 mb-8">Video Call</p>
+
+                <div className="flex gap-6">
+                  {callStatus === "receiving" && (
+                    <button
+                      onClick={answerCall}
+                      className="p-4 bg-emerald-500 hover:bg-emerald-600 rounded-full transition-all shadow-lg shadow-emerald-500/30"
+                    >
+                      <Video className="w-8 h-8 text-white" />
+                    </button>
+                  )}
+                  <button
+                    onClick={endCall}
+                    className="p-4 bg-rose-500 hover:bg-rose-600 rounded-full transition-all shadow-lg shadow-rose-500/30"
+                  >
+                    <PhoneOff className="w-8 h-8 text-white" />
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* CONNECTED VIDEO GRID */}
+            {callStatus === "connected" && (
+              <div className="w-full h-full p-4 flex flex-col gap-4">
+                <div className="flex-1 relative bg-black rounded-3xl overflow-hidden shadow-2xl border border-gray-800">
+                  <video
+                    ref={remoteVideoRef}
+                    autoPlay
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute bottom-6 left-6 bg-black/50 backdrop-blur-md px-4 py-2 rounded-xl text-white font-medium">
+                    {callData?.name || "Remote User"}
+                  </div>
+
+                  {/* LOCAL VIDEO (PIP) */}
+                  <div className="absolute top-6 right-6 w-48 h-36 bg-gray-800 rounded-2xl overflow-hidden border-2 border-gray-700 shadow-xl">
+                    <video
+                      ref={localVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                </div>
+
+                {/* CONTROLS */}
+                <div className="h-24 bg-gray-900 border border-gray-800 rounded-3xl flex items-center justify-center gap-6 shadow-2xl">
+                  <button
+                    onClick={toggleMic}
+                    className={`p-4 rounded-full transition-all ${isMicMuted ? "bg-red-500/20 text-red-500" : "bg-gray-800 hover:bg-gray-700 text-white"}`}
+                  >
+                    {isMicMuted ? <MicOff /> : <Mic />}
+                  </button>
+                  <button
+                    onClick={endCall}
+                    className="p-5 bg-rose-500 hover:bg-rose-600 rounded-full shadow-lg shadow-rose-500/30 text-white transform hover:scale-105 transition-all"
+                  >
+                    <PhoneOff className="w-8 h-8" />
+                  </button>
+                  <button
+                    onClick={toggleVideo}
+                    className={`p-4 rounded-full transition-all ${isVideoOff ? "bg-red-500/20 text-red-500" : "bg-gray-800 hover:bg-gray-700 text-white"}`}
+                  >
+                    {isVideoOff ? <CameraOff /> : <Camera />}
+                  </button>
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -484,8 +801,44 @@ const Chat = () => {
               <span>Online — {onlineUserIds.length}</span>
             </div>
             <div className="space-y-3 px-2">
-              {onlineUserIds.includes(user?.id) ? (
-                <div className="flex items-center gap-3 bg-gray-800/50 p-2 rounded-lg border border-gray-700/50">
+              {/* --- 4. VIDEO CALL BUTTONS IN SIDEBAR --- */}
+              {/* We render "Online Users" here. In a real app we'd fetch names. */}
+              {/* Since we only have IDs, we just render "User {ID}" or similar if they aren't us */}
+              {onlineUserIds.map((uid) => {
+                const isMe = String(uid) === String(user?.id);
+                if (isMe) return null; // Don't show myself
+
+                return (
+                  <div
+                    key={uid}
+                    className="flex items-center justify-between bg-gray-800/50 p-2 rounded-lg border border-gray-700/50 hover:bg-gray-800 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="relative">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-gray-600 to-gray-500 flex items-center justify-center text-xs font-bold shadow-inner">
+                          {/* We don't have usernames for online list in this simple store, just IDs. */}
+                          {/* Real app would fetch this. For now, use 'U' */}U
+                        </div>
+                        <div className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-gray-800 rounded-full"></div>
+                      </div>
+                      <span className="text-xs font-medium text-gray-300">
+                        User {uid}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => startCall(uid)}
+                      className="p-1.5 text-gray-400 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-lg transition-all"
+                      title="Start Video Call"
+                    >
+                      <Video className="w-4 h-4" />
+                    </button>
+                  </div>
+                );
+              })}
+
+              {/* Show Me at the bottom or separate */}
+              {onlineUserIds.includes(user?.id) && (
+                <div className="flex items-center gap-3 bg-indigo-900/20 p-2 rounded-lg border border-indigo-500/20 mt-4">
                   <div className="relative">
                     <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-xs font-bold shadow-inner">
                       {user?.username?.[0]?.toUpperCase()}
@@ -499,7 +852,7 @@ const Chat = () => {
                     </span>
                   </div>
                 </div>
-              ) : null}
+              )}
             </div>
           </div>
         </div>
@@ -519,9 +872,8 @@ const Chat = () => {
         </div>
       </div>
 
-      {/* MAIN AREA */}
+      {/* MAIN AREA (Messages) */}
       <div className="flex-1 flex flex-col min-w-0 bg-gray-950 relative">
-        {/* HEADER */}
         <div className="h-20 glass-header flex items-center px-6 sticky top-0 z-20 justify-between">
           <div className="flex items-center w-full">
             <button
@@ -531,7 +883,6 @@ const Chat = () => {
               <Menu className="w-6 h-6" />
             </button>
             {isSearchOpen ? (
-              // --- 3. motion used here ---
               <motion.div
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -603,7 +954,6 @@ const Chat = () => {
             </div>
           )}
 
-          {/* --- 4. isSearching used here --- */}
           {isSearching && messages.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-gray-500">
               <Search className="w-12 h-12 mb-2 opacity-20" />
@@ -636,11 +986,11 @@ const Chat = () => {
                 );
                 const isRead = isMe && getMessageReadStatus(msg.id);
 
+                // --- SMART GROUPING LOGIC ---
                 const prevMsg = messages[idx - 1];
                 const isSequence = prevMsg && prevMsg.sender === msg.sender;
 
                 return (
-                  // --- 5. motion used here for messages ---
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -785,7 +1135,6 @@ const Chat = () => {
             </AnimatePresence>
           )}
 
-          {/* --- 6. motion used here for typing indicator --- */}
           {typingUsers.length > 0 && (
             <motion.div
               initial={{ opacity: 0, y: 10 }}

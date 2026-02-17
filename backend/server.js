@@ -1,13 +1,16 @@
+const dotenv = require("dotenv");
+dotenv.config(); // <--- MOVE THIS TO THE TOP (Line 1 & 2)
+
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
-const dotenv = require("dotenv");
+// const dotenv = require("dotenv"); // <--- DELETE THIS LINE (Moved up)
 const db = require("./db/models");
 const initSocket = require("./sockets");
 const authRoutes = require("./routes/auth");
 const uploadRoutes = require("./routes/upload");
 const initWorker = require("./workers/chatWorker");
-const initReceiptWorker = require("./workers/receiptWorker"); // <--- Import
+const initReceiptWorker = require("./workers/receiptWorker");
 
 const {
   getMessages,
@@ -15,7 +18,7 @@ const {
   searchMessages,
 } = require("./controllers/messageController");
 
-dotenv.config();
+// dotenv.config(); // <--- DELETE THIS LINE (Moved up)
 
 const app = express();
 const server = http.createServer(app);
@@ -38,7 +41,7 @@ initSocket(server).then((io) => {
 
   // Start Background Workers
   initWorker(io);
-  initReceiptWorker(); // <--- Start Receipt Flusher
+  initReceiptWorker();
 
   db.sequelize
     .authenticate()

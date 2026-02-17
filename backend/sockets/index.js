@@ -18,6 +18,7 @@ module.exports = async (httpServer) => {
     adapter: createAdapter(pubClient, subClient),
   });
 
+  // Map to store userId -> socketId
   const onlineUsers = new Map();
 
   io.on("connection", (socket) => {
@@ -33,22 +34,55 @@ module.exports = async (httpServer) => {
       socket.join(channelId);
     });
 
-    // --- NEW: Handle Read Receipts (Write-Behind) ---
+    // --- WEBRTC SIGNALING EVENTS ---
+
+    // 1. Caller initiates call
+    socket.on("call_user", (data) => {
+      // data: { userToCall, signalData, from, name }
+      const socketIdToCall = onlineUsers.get(data.userToCall);
+      if (socketIdToCall) {
+        io.to(socketIdToCall).emit("call_user", {
+          signal: data.signalData,
+          from: data.from,
+          name: data.name,
+        });
+      }
+    });
+
+    // 2. Callee accepts call
+    socket.on("answer_call", (data) => {
+      // data: { to, signal }
+      const socketIdToAnswer = onlineUsers.get(data.to);
+      if (socketIdToAnswer) {
+        io.to(socketIdToAnswer).emit("call_accepted", data.signal);
+      }
+    });
+
+    // 3. Exchange ICE Candidates (Network paths)
+    socket.on("ice_candidate", (data) => {
+      // data: { to, candidate }
+      const socketId = onlineUsers.get(data.to);
+      if (socketId) {
+        io.to(socketId).emit("ice_candidate", data.candidate);
+      }
+    });
+
+    // 4. End Call
+    socket.on("end_call", (data) => {
+      const socketId = onlineUsers.get(data.to);
+      if (socketId) {
+        io.to(socketId).emit("call_ended");
+      }
+    });
+
+    // --- EXISTING EVENTS ---
+
     socket.on("mark_read", async ({ channelId, messageId, userId }) => {
-      // 1. Validation
       if (!channelId || !messageId || !userId) return;
-
-      // 2. Buffer Update in Redis (Fast)
-      // Key format: receipt:channel:{cid}:user:{uid}
       const key = `receipt:channel:${channelId}:user:${userId}`;
-
-      // Only update if the new ID is greater than what's stored (Cursors only move forward)
       const currentRead = await redisClient.get(key);
       if (!currentRead || parseInt(messageId) > parseInt(currentRead)) {
         await redisClient.set(key, messageId);
-
-        // 3. Broadcast to everyone in the channel immediately
-        // "User X has read up to message Y"
         io.to(channelId).emit("user_read_update", {
           userId,
           channelId,
@@ -80,12 +114,7 @@ module.exports = async (httpServer) => {
           await socketLimiter.consume(limiterKey);
         } catch (limiterError) {
           if (limiterError instanceof Error) {
-            console.error(
-              "⚠️ Rate Limiter Error (Allowing Message):",
-              limiterError.message,
-            );
-          } else {
-            throw limiterError;
+            console.error("Rate Limit Error:", limiterError.message);
           }
         }
 
@@ -104,7 +133,6 @@ module.exports = async (httpServer) => {
         socket.emit("message_queued", { status: "queued" });
       } catch (rejRes) {
         const timeToWait = Math.round(rejRes.msBeforeNext / 1000) || 1;
-        console.warn(`🚫 User ${data.senderId} blocked.`);
         socket.emit("message_error", {
           error: `Sending too fast! Wait ${timeToWait} seconds.`,
         });

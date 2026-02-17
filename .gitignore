@@ -1,0 +1,65 @@
+# ---------------------------------
+# 1. Dependencies & Logs (All Folders)
+# ---------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+logs/
+*.log
+
+# ---------------------------------
+# 2. Environment Variables (CRITICAL)
+# ---------------------------------
+# Never commit these! They contain your API keys and Secrets.
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.production
+
+# ---------------------------------
+# 3. Build Outputs & Distributables
+# ---------------------------------
+dist/
+build/
+out/
+coverage/
+.nyc_output/
+
+# ---------------------------------
+# 4. OS & Editor System Files
+# ---------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---------------------------------
+# 5. Backend Specific
+# ---------------------------------
+# Local uploads (if you tested local storage before Cloudinary)
+nexus_chat_uploads/
+backend/uploads/
+
+# Redis local dump file
+dump.rdb
+
+# ---------------------------------
+# 6. Frontend Specific (Vite/React)
+# ---------------------------------
+*.local
+.eslintcache
+
+# ---------------------------------
+# 7. Testing
+# ---------------------------------
+/coverage
